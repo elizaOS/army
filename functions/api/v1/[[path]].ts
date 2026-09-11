@@ -115,6 +115,13 @@ async function privateIntakeStatus(
   fetchImpl: typeof fetch,
   now: () => Date,
 ): Promise<PrivateIntakeStatus> {
+  // The reviewed Pages bundle carries a build-time attestation that GitHub
+  // private vulnerability reporting was enabled for the released revision. A
+  // fresh attestation answers without any external request. A missing,
+  // malformed or expired attestation is not itself evidence that intake is
+  // disabled, so it falls through to the bounded live GitHub check below
+  // instead of failing closed on the age of a deploy. Only GitHub's own
+  // answer, or the inability to obtain one, decides availability.
   if (assets !== undefined) {
     try {
       const url = new URL(PRIVATE_INTAKE_ATTESTATION_PATH, requestUrl);
@@ -124,20 +131,23 @@ async function privateIntakeStatus(
           headers: { accept: "application/json" },
         }),
       );
-      if (!response.ok) return { status: "unavailable" };
-      const value = await readBoundedJson(
-        response,
-        MAX_PRIVATE_INTAKE_RESPONSE_BYTES,
-      );
-      const attestation = parsePrivateIntakeAttestation(value, now());
-      if (attestation === null) return { status: "unavailable" };
-      return {
-        status: "verified",
-        enabled: true,
-        verifiedAt: attestation.verifiedAt,
-      };
+      if (response.ok) {
+        const value = await readBoundedJson(
+          response,
+          MAX_PRIVATE_INTAKE_RESPONSE_BYTES,
+        );
+        const attestation = parsePrivateIntakeAttestation(value, now());
+        if (attestation !== null) {
+          return {
+            status: "verified",
+            enabled: true,
+            verifiedAt: attestation.verifiedAt,
+          };
+        }
+      }
     } catch {
-      return { status: "unavailable" };
+      // The bundle attestation is an optimization, not the authority.
+      // Continue to the bounded live GitHub check.
     }
   }
   if (cache !== undefined) {

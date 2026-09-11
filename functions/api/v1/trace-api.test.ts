@@ -565,6 +565,140 @@ describe("private trace API", () => {
     });
   });
 
+  it("falls through to the live GitHub check when the bundle attestation has expired", async () => {
+    const originalFetch = globalThis.fetch;
+    const githubRequests: string[] = [];
+    try {
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        githubRequests.push(String(input));
+        return new Response(JSON.stringify({ enabled: true }), {
+          status: 200,
+        });
+      }) as unknown as typeof fetch;
+      const expiredAt = new Date(
+        Date.now() - 50 * 60 * 60 * 1000,
+      ).toISOString();
+      const response = await onPagesRequest({
+        request: new Request(
+          "https://api.slop.cash/api/v1/private-request-intake",
+        ),
+        env: {
+          SLOP_DB: {} as never,
+          PRIVATE_TRACES: {} as never,
+          TRACE_AUTH_SECRET: SECRET,
+          SLOP_IDENTITY: {
+            fetch: async () => new Response(null, { status: 401 }),
+          },
+          ASSETS: {
+            fetch: async () =>
+              new Response(
+                JSON.stringify({
+                  enabled: true,
+                  source: "github-public-status",
+                  verifiedAt: expiredAt,
+                  revision: "a".repeat(40),
+                }),
+                { status: 200 },
+              ),
+          },
+        },
+      });
+
+      expect(githubRequests).toEqual([
+        "https://api.github.com/repos/SlopDotCash/slopdotcash/private-vulnerability-reporting",
+      ]);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        enabled: true,
+        source: "github-public-status",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("falls through to the live GitHub check when the bundle attestation is missing", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ enabled: true }), {
+          status: 200,
+        })) as unknown as typeof fetch;
+      const response = await onPagesRequest({
+        request: new Request(
+          "https://api.slop.cash/api/v1/private-request-intake",
+        ),
+        env: {
+          SLOP_DB: {} as never,
+          PRIVATE_TRACES: {} as never,
+          TRACE_AUTH_SECRET: SECRET,
+          SLOP_IDENTITY: {
+            fetch: async () => new Response(null, { status: 401 }),
+          },
+          ASSETS: {
+            fetch: async () => new Response(null, { status: 404 }),
+          },
+        },
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        enabled: true,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("still fails closed when the bundle attestation has expired and GitHub cannot answer", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+          status: 403,
+          headers: {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "999999999999",
+          },
+        })) as unknown as typeof fetch;
+      const expiredAt = new Date(
+        Date.now() - 50 * 60 * 60 * 1000,
+      ).toISOString();
+      const response = await onPagesRequest({
+        request: new Request(
+          "https://api.slop.cash/api/v1/private-request-intake",
+        ),
+        env: {
+          SLOP_DB: {} as never,
+          PRIVATE_TRACES: {} as never,
+          TRACE_AUTH_SECRET: SECRET,
+          SLOP_IDENTITY: {
+            fetch: async () => new Response(null, { status: 401 }),
+          },
+          ASSETS: {
+            fetch: async () =>
+              new Response(
+                JSON.stringify({
+                  enabled: true,
+                  source: "github-public-status",
+                  verifiedAt: expiredAt,
+                  revision: "a".repeat(40),
+                }),
+                { status: 200 },
+              ),
+          },
+        },
+      });
+
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({
+        error: "private_intake_unavailable",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("serves a cached public private intake verification", async () => {
     const originalFetch = globalThis.fetch;
     const originalCaches = Object.getOwnPropertyDescriptor(
